@@ -1,4 +1,5 @@
 require 'active_record/connection_adapters/abstract_adapter'
+require 'active_record/connection_adapters/statement_pool'
 require 'active_record/connection_adapters/mysql/column'
 require 'active_record/connection_adapters/mysql/explain_pretty_printer'
 require 'active_record/connection_adapters/mysql/quoting'
@@ -14,14 +15,17 @@ module ActiveRecord
     class AbstractMysqlAdapter < AbstractAdapter
       include MySQL::Quoting
       include MySQL::ColumnDumper
-      include Savepoints
 
       def update_table_definition(table_name, base) # :nodoc:
         MySQL::Table.new(table_name, base)
       end
 
-      def schema_creation
+      def schema_creation # :nodoc:
         MySQL::SchemaCreation.new(self)
+      end
+
+      def arel_visitor # :nodoc:
+        Arel::Visitors::MySQL.new(self)
       end
 
       ##
@@ -52,17 +56,16 @@ module ActiveRecord
       INDEX_TYPES  = [:fulltext, :spatial]
       INDEX_USINGS = [:btree, :hash]
 
+      class StatementPool < ConnectionAdapters::StatementPool
+        private def dealloc(stmt)
+          stmt[:stmt].close
+        end
+      end
+
       def initialize(connection, logger, connection_options, config)
         super(connection, logger, config)
 
-        @visitor = Arel::Visitors::MySQL.new self
-
-        if self.class.type_cast_config_to_boolean(config.fetch(:prepared_statements) { true })
-          @prepared_statements = true
-          @visitor.extend(DetermineIfPreparableVisitor)
-        else
-          @prepared_statements = false
-        end
+        @statements = StatementPool.new(self.class.type_cast_config_to_integer(config[:statement_limit]))
 
         if version < '5.0.0'
           raise "Your version of MySQL (#{full_version.match(/^\d+\.\d+\.\d+/)[0]}) is too old. Active Record supports MySQL >= 5.0."
@@ -95,6 +98,12 @@ module ActiveRecord
       end
 
       def supports_bulk_alter? #:nodoc:
+        true
+      end
+
+      # Returns true, since this connection adapter supports prepared statement
+      # caching.
+      def supports_statement_cache?
         true
       end
 
@@ -137,11 +146,11 @@ module ActiveRecord
       end
 
       def get_advisory_lock(lock_name, timeout = 0) # :nodoc:
-        select_value("SELECT GET_LOCK('#{lock_name}', #{timeout});").to_s == '1'
+        select_value("SELECT GET_LOCK(#{quote(lock_name)}, #{timeout})") == 1
       end
 
       def release_advisory_lock(lock_name) # :nodoc:
-        select_value("SELECT RELEASE_LOCK('#{lock_name}')").to_s == '1'
+        select_value("SELECT RELEASE_LOCK(#{quote(lock_name)})") == 1
       end
 
       def native_database_types
@@ -160,8 +169,8 @@ module ActiveRecord
         raise NotImplementedError
       end
 
-      def new_column(field, default, sql_type_metadata, null, table_name, default_function = nil, collation = nil, comment = nil) # :nodoc:
-        MySQL::Column.new(field, default, sql_type_metadata, null, table_name, default_function, collation, comment)
+      def new_column(*args) #:nodoc:
+        MySQL::Column.new(*args)
       end
 
       # Must return the MySQL error number from the exception, if the exception has an
@@ -183,6 +192,14 @@ module ActiveRecord
         end
       end
 
+      # CONNECTION MANAGEMENT ====================================
+
+      # Clears the prepared statements cache.
+      def clear_cache!
+        reload_type_map
+        @statements.clear
+      end
+
       #--
       # DATABASE STATEMENTS ======================================
       #++
@@ -194,11 +211,6 @@ module ActiveRecord
         elapsed = Time.now - start
 
         MySQL::ExplainPrettyPrinter.new.pp(result, elapsed)
-      end
-
-      def clear_cache!
-        super
-        reload_type_map
       end
 
       # Executes the SQL statement in the context of this connection.
@@ -335,8 +347,7 @@ module ActiveRecord
       def data_source_exists?(table_name)
         return false unless table_name.present?
 
-        schema, name = table_name.to_s.split('.', 2)
-        schema, name = @config[:database], schema unless name # A table was provided without a schema
+        schema, name = extract_schema_qualified_name(table_name)
 
         sql = "SELECT table_name FROM information_schema.tables "
         sql << "WHERE table_schema = #{quote(schema)} AND table_name = #{quote(name)}"
@@ -351,8 +362,7 @@ module ActiveRecord
       def view_exists?(view_name) # :nodoc:
         return false unless view_name.present?
 
-        schema, name = view_name.to_s.split('.', 2)
-        schema, name = @config[:database], schema unless name # A view was provided without a schema
+        schema, name = extract_schema_qualified_name(view_name)
 
         sql = "SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW'"
         sql << " AND table_schema = #{quote(schema)} AND table_name = #{quote(name)}"
@@ -394,20 +404,20 @@ module ActiveRecord
           else
             default, default_function = field[:Default], nil
           end
-          new_column(field[:Field], default, type_metadata, field[:Null] == "YES", table_name, default_function, field[:Collation], field[:Comment].presence)
+          new_column(field[:Field], default, type_metadata, field[:Null] == "YES", table_name, default_function, field[:Collation], comment: field[:Comment].presence)
         end
       end
 
-      def table_comment(table_name)
+      def table_comment(table_name) # :nodoc:
         select_value(<<-SQL.strip_heredoc, 'SCHEMA')
           SELECT table_comment
-          FROM INFORMATION_SCHEMA.TABLES
-          WHERE table_name=#{quote(table_name)};
+          FROM information_schema.tables
+          WHERE table_name=#{quote(table_name)}
         SQL
       end
 
-      def create_table(table_name, options = {}) #:nodoc:
-        super(table_name, options.reverse_merge(:options => "ENGINE=InnoDB"))
+      def create_table(table_name, **options) #:nodoc:
+        super(table_name, options: 'ENGINE=InnoDB', **options)
       end
 
       def bulk_change_table(table_name, operations) #:nodoc:
@@ -492,11 +502,19 @@ module ActiveRecord
       def add_index(table_name, column_name, options = {}) #:nodoc:
         index_name, index_type, index_columns, _, index_algorithm, index_using, comment = add_index_options(table_name, column_name, options)
         sql = "CREATE #{index_type} INDEX #{quote_column_name(index_name)} #{index_using} ON #{quote_table_name(table_name)} (#{index_columns}) #{index_algorithm}"
+        execute add_sql_comment!(sql, comment)
+      end
+
+      def add_sql_comment!(sql, comment) # :nodoc:
         sql << " COMMENT #{quote(comment)}" if comment
-        execute sql
+        sql
       end
 
       def foreign_keys(table_name)
+        raise ArgumentError unless table_name.present?
+
+        schema, name = extract_schema_qualified_name(table_name)
+
         fk_info = select_all <<-SQL.strip_heredoc
           SELECT fk.referenced_table_name as 'to_table'
                 ,fk.referenced_column_name as 'primary_key'
@@ -504,8 +522,8 @@ module ActiveRecord
                 ,fk.constraint_name as 'name'
           FROM information_schema.key_column_usage fk
           WHERE fk.referenced_column_name is not null
-            AND fk.table_schema = '#{@config[:database]}'
-            AND fk.table_name = '#{table_name}'
+            AND fk.table_schema = #{quote(schema)}
+            AND fk.table_name = #{quote(name)}
         SQL
 
         create_table_info = create_table_info(table_name)
@@ -572,8 +590,7 @@ module ActiveRecord
       def primary_keys(table_name) # :nodoc:
         raise ArgumentError unless table_name.present?
 
-        schema, name = table_name.to_s.split('.', 2)
-        schema, name = @config[:database], schema unless name # A table was provided without a schema
+        schema, name = extract_schema_qualified_name(table_name)
 
         select_values(<<-SQL.strip_heredoc, 'SCHEMA')
           SELECT column_name
@@ -690,7 +707,7 @@ module ActiveRecord
           case length
           when Hash
             column_names.each {|name| option_strings[name] += "(#{length[name]})" if length.has_key?(name) && length[name].present?}
-          when Fixnum
+          when Integer
             column_names.each {|name| option_strings[name] += "(#{length})"}
           end
         end
@@ -710,12 +727,22 @@ module ActiveRecord
         column_names.map {|name| quote_column_name(name) + option_strings[name]}
       end
 
+      # See https://dev.mysql.com/doc/refman/5.7/en/error-messages-server.html
+      ER_DUP_ENTRY            = 1062
+      ER_NO_REFERENCED_ROW_2  = 1452
+      ER_DATA_TOO_LONG        = 1406
+      ER_LOCK_DEADLOCK        = 1213
+
       def translate_exception(exception, message)
         case error_number(exception)
-        when 1062
+        when ER_DUP_ENTRY
           RecordNotUnique.new(message)
-        when 1452
+        when ER_NO_REFERENCED_ROW_2
           InvalidForeignKey.new(message)
+        when ER_DATA_TOO_LONG
+          ValueTooLong.new(message)
+        when ER_LOCK_DEADLOCK
+          TransactionSerializationError.new(message)
         else
           super
         end
@@ -813,7 +840,7 @@ module ActiveRecord
 
         # Increase timeout so the server doesn't disconnect us.
         wait_timeout = @config[:wait_timeout]
-        wait_timeout = 2147483 unless wait_timeout.is_a?(Fixnum)
+        wait_timeout = 2147483 unless wait_timeout.is_a?(Integer)
         variables['wait_timeout'] = self.class.type_cast_config_to_integer(wait_timeout)
 
         defaults = [':default', :default].to_set
@@ -881,8 +908,14 @@ module ActiveRecord
         create_table_info_cache[table_name] ||= select_one("SHOW CREATE TABLE #{quote_table_name(table_name)}")["Create Table"]
       end
 
-      def create_table_definition(name, temporary = false, options = nil, as = nil, comment = nil) # :nodoc:
-        MySQL::TableDefinition.new(name, temporary, options, as, comment)
+      def create_table_definition(*args) # :nodoc:
+        MySQL::TableDefinition.new(*args)
+      end
+
+      def extract_schema_qualified_name(string) # :nodoc:
+        schema, name = string.to_s.scan(/[^`.\s]+|`[^`]*`/)
+        schema, name = @config[:database], schema unless name
+        [schema, name]
       end
 
       def integer_to_sql(limit) # :nodoc:

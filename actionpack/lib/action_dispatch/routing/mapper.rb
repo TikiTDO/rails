@@ -1,4 +1,3 @@
-require 'active_support/core_ext/hash/reverse_merge'
 require 'active_support/core_ext/hash/slice'
 require 'active_support/core_ext/enumerable'
 require 'active_support/core_ext/array/extract_options'
@@ -121,7 +120,7 @@ module ActionDispatch
 
           if options_constraints.is_a?(Hash)
             @defaults = Hash[options_constraints.find_all { |key, default|
-              URL_OPTIONS.include?(key) && (String === default || Fixnum === default)
+              URL_OPTIONS.include?(key) && (String === default || Integer === default)
             }].merge @defaults
             @blocks = blocks
             constraints.merge! options_constraints
@@ -137,6 +136,10 @@ module ActionDispatch
           @requirements = formats[:requirements].merge Hash[requirements]
           @conditions = Hash[conditions]
           @defaults = formats[:defaults].merge(@defaults).merge(normalize_defaults(options))
+
+          if path_params.include?(:action) && !@requirements.key?(:action)
+            @defaults[:action] ||= 'index'
+          end
 
           @required_defaults = (split_options[:required_defaults] || []).map(&:first)
         end
@@ -821,10 +824,10 @@ module ActionDispatch
 
           if options[:constraints].is_a?(Hash)
             defaults = options[:constraints].select do |k, v|
-              URL_OPTIONS.include?(k) && (v.is_a?(String) || v.is_a?(Fixnum))
+              URL_OPTIONS.include?(k) && (v.is_a?(String) || v.is_a?(Integer))
             end
 
-            (options[:defaults] ||= {}).reverse_merge!(defaults)
+            options[:defaults] = defaults.merge(options[:defaults] || {})
           else
             block, options[:constraints] = options[:constraints], {}
           end
@@ -2085,8 +2088,7 @@ to this:
 
         def each
           node = self
-          loop do
-            break if node.equal? NULL
+          until node.equal? NULL
             yield node
             node = node.parent
           end

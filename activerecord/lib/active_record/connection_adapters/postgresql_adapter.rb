@@ -16,8 +16,6 @@ require "active_record/connection_adapters/postgresql/type_metadata"
 require "active_record/connection_adapters/postgresql/utils"
 require "active_record/connection_adapters/statement_pool"
 
-require 'ipaddr'
-
 module ActiveRecord
   module ConnectionHandling # :nodoc:
     # Establishes a connection to the database that's used by all Active Record objects
@@ -119,10 +117,13 @@ module ActiveRecord
       include PostgreSQL::SchemaStatements
       include PostgreSQL::DatabaseStatements
       include PostgreSQL::ColumnDumper
-      include Savepoints
 
       def schema_creation # :nodoc:
         PostgreSQL::SchemaCreation.new self
+      end
+
+      def arel_visitor # :nodoc:
+        Arel::Visitors::PostgreSQL.new(self)
       end
 
       # Returns true, since this connection adapter supports prepared statement
@@ -136,6 +137,10 @@ module ActiveRecord
       end
 
       def supports_partial_index?
+        true
+      end
+
+      def supports_expression_index?
         true
       end
 
@@ -160,6 +165,10 @@ module ActiveRecord
       end
 
       def supports_comments?
+        true
+      end
+
+      def supports_savepoints?
         true
       end
 
@@ -199,14 +208,6 @@ module ActiveRecord
       def initialize(connection, logger, connection_parameters, config)
         super(connection, logger, config)
 
-        @visitor = Arel::Visitors::PostgreSQL.new self
-        if self.class.type_cast_config_to_boolean(config.fetch(:prepared_statements) { true })
-          @prepared_statements = true
-          @visitor.extend(DetermineIfPreparableVisitor)
-        else
-          @prepared_statements = false
-        end
-
         @connection_parameters = connection_parameters
 
         # @local_tz is initialized as nil to avoid warnings when connect tries to use it
@@ -216,7 +217,7 @@ module ActiveRecord
         connect
         add_pg_encoders
         @statements = StatementPool.new @connection,
-                                        self.class.type_cast_config_to_integer(config.fetch(:statement_limit) { 1000 })
+                                        self.class.type_cast_config_to_integer(config[:statement_limit])
 
         if postgresql_version < 90100
           raise "Your version of PostgreSQL (#{postgresql_version}) is too old. Active Record supports PostgreSQL >= 9.1."
@@ -402,8 +403,10 @@ module ActiveRecord
       protected
 
         # See http://www.postgresql.org/docs/current/static/errcodes-appendix.html
+        VALUE_LIMIT_VIOLATION = "22001"
         FOREIGN_KEY_VIOLATION = "23503"
         UNIQUE_VIOLATION      = "23505"
+        SERIALIZATION_FAILURE = "40001"
 
         def translate_exception(exception, message)
           return exception unless exception.respond_to?(:result)
@@ -413,6 +416,10 @@ module ActiveRecord
             RecordNotUnique.new(message)
           when FOREIGN_KEY_VIOLATION
             InvalidForeignKey.new(message)
+          when VALUE_LIMIT_VIOLATION
+            ValueTooLong.new(message)
+          when SERIALIZATION_FAILURE
+            TransactionSerializationError.new(message)
           else
             super
           end
@@ -751,8 +758,8 @@ module ActiveRecord
           $1.strip if $1
         end
 
-        def create_table_definition(name, temporary = false, options = nil, as = nil, comment = nil) # :nodoc:
-          PostgreSQL::TableDefinition.new(name, temporary, options, as, comment)
+        def create_table_definition(*args) # :nodoc:
+          PostgreSQL::TableDefinition.new(*args)
         end
 
         def can_perform_case_insensitive_comparison_for?(column)
