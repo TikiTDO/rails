@@ -390,9 +390,8 @@ module ActionMailer
   #     to use it. Defaults to <tt>true</tt>.
   #   * <tt>:openssl_verify_mode</tt> - When using TLS, you can set how OpenSSL checks the certificate. This is
   #     really useful if you need to validate a self-signed and/or a wildcard certificate. You can use the name
-  #     of an OpenSSL verify constant (<tt>'none'</tt>, <tt>'peer'</tt>, <tt>'client_once'</tt>,
-  #     <tt>'fail_if_no_peer_cert'</tt>) or directly the constant (<tt>OpenSSL::SSL::VERIFY_NONE</tt>,
-  #     <tt>OpenSSL::SSL::VERIFY_PEER</tt>, ...).
+  #     of an OpenSSL verify constant (<tt>'none'</tt> or <tt>'peer'</tt>) or directly the constant
+  #     (<tt>OpenSSL::SSL::VERIFY_NONE</tt> or <tt>OpenSSL::SSL::VERIFY_PEER</tt>).
   #     <tt>:ssl/:tls</tt> Enables the SMTP connection to use SMTP/TLS (SMTPS: SMTP over direct TLS connection)
   #
   # * <tt>sendmail_settings</tt> - Allows you to override options for the <tt>:sendmail</tt> delivery method.
@@ -488,7 +487,7 @@ module ActionMailer
       end
       private :observer_class_for
 
-      # Returns the name of current mailer. This method is also being used as a path for a view lookup.
+      # Returns the name of the current mailer. This method is also being used as a path for a view lookup.
       # If this is an anonymous mailer, this method will return +anonymous+ instead.
       def mailer_name
         @mailer_name ||= anonymous? ? "anonymous" : name.underscore

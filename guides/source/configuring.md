@@ -224,8 +224,6 @@ Every Rails application comes with a standard set of middleware which it uses in
 * `ActionDispatch::RemoteIp` checks for IP spoofing attacks and gets valid `client_ip` from request headers. Configurable with the `config.action_dispatch.ip_spoofing_check`, and `config.action_dispatch.trusted_proxies` options.
 * `Rack::Sendfile` intercepts responses whose body is being served from a file and replaces it with a server specific X-Sendfile header. Configurable with `config.action_dispatch.x_sendfile_header`.
 * `ActionDispatch::Callbacks` runs the prepare callbacks before serving the request.
-* `ActiveRecord::ConnectionAdapters::ConnectionManagement` cleans active connections after each request, unless the `rack.test` key in the request environment is set to `true`.
-* `ActiveRecord::QueryCache` caches all SELECT queries generated in a request. If any INSERT or UPDATE takes place then the cache is cleaned.
 * `ActionDispatch::Cookies` sets cookies for the request.
 * `ActionDispatch::Session::CookieStore` is responsible for storing the session in cookies. An alternate middleware can be used for this by changing the `config.action_controller.session_store` to an alternate value. Additionally, options passed to this can be configured by using `config.action_controller.session_options`.
 * `ActionDispatch::Flash` sets up the `flash` keys. Only available if `config.action_controller.session_store` is set to a value.
@@ -242,6 +240,12 @@ This will put the `Magical::Unicorns` middleware on the end of the stack. You ca
 
 ```ruby
 config.middleware.insert_before Rack::Head, Magical::Unicorns
+```
+
+Or you can insert a middleware to exact position by using indexes. For example, if you want to insert `Magical::Unicorns` middleware on top of the stack, you can do it, like so:
+
+```ruby
+config.middleware.insert_before 0, Magical::Unicorns
 ```
 
 There's also `insert_after` which will insert a middleware after another:
@@ -273,6 +277,26 @@ All these configuration options are delegated to the `I18n` library.
 * `config.i18n.enforce_available_locales` ensures that all locales passed through i18n must be declared in the `available_locales` list, raising an `I18n::InvalidLocale` exception when setting an unavailable locale. Defaults to `true`. It is recommended not to disable this option unless strongly required, since this works as a security measure against setting any invalid locale from user input.
 
 * `config.i18n.load_path` sets the path Rails uses to look for locale files. Defaults to `config/locales/*.{yml,rb}`.
+
+* `config.i18n.fallbacks` sets fallback behavior for missing translations. Here are 3 usage examples for this option:
+
+  * You can set the option to `true` for using default locale as fallback, like so:
+
+    ```ruby
+    config.i18n.fallbacks = true
+    ```
+
+  * Or you can set an array of locales as fallback, like so:
+
+    ```ruby
+    config.i18n.fallbacks = [:tr, :en]
+    ```
+
+  * Or you can set different fallbacks for locales individually. For example, if you want to use `:tr` for `:az` and `:de`, `:en` for `:da` as fallbacks, you can do it, like so:
+
+    ```ruby
+    config.i18n.fallbacks = { az: :tr, da: [:de, :en] }
+    ```
 
 ### Configuring Active Record
 
@@ -500,7 +524,7 @@ There are a number of settings available on `config.action_mailer`:
     * `:password` - If your mail server requires authentication, set the password in this setting.
     * `:authentication` - If your mail server requires authentication, you need to specify the authentication type here. This is a symbol and one of `:plain`, `:login`, `:cram_md5`.
     * `:enable_starttls_auto` - Detects if STARTTLS is enabled in your SMTP server and starts to use it. It defaults to `true`.
-    * `:openssl_verify_mode` - When using TLS, you can set how OpenSSL checks the certificate. This is useful if you need to validate a self-signed and/or a wildcard certificate. This can be one of the OpenSSL verify constants, `:none`, `:peer`, `:client_once`, `:fail_if_no_peer_cert`, or the constant directly `OpenSSL::SSL::VERIFY_NONE`.
+    * `:openssl_verify_mode` - When using TLS, you can set how OpenSSL checks the certificate. This is useful if you need to validate a self-signed and/or a wildcard certificate. This can be one of the OpenSSL verify constants, `:none` or `:peer` -- or the constant directly `OpenSSL::SSL::VERIFY_NONE` or `OpenSSL::SSL::VERIFY_PEER`, respectively.
     * `:ssl/:tls` - Enables the SMTP connection to use SMTP/TLS (SMTPS: SMTP over direct TLS connection).                                  
 
 * `config.action_mailer.sendmail_settings` allows detailed configuration for the `sendmail` delivery method. It accepts a hash of options, which can include any of these options:

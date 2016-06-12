@@ -14,7 +14,6 @@ require 'models/auto_id'
 require 'models/boolean'
 require 'models/column_name'
 require 'models/subscriber'
-require 'models/keyboard'
 require 'models/comment'
 require 'models/minimalistic'
 require 'models/warehouse_thing'
@@ -25,7 +24,6 @@ require 'models/joke'
 require 'models/bird'
 require 'models/car'
 require 'models/bulb'
-require 'rexml/document'
 require 'concurrent/atomic/count_down_latch'
 
 class FirstAbstractClass < ActiveRecord::Base
@@ -1502,6 +1500,10 @@ class BasicsTest < ActiveRecord::TestCase
   # delete this.
   test "records without an id have unique hashes" do
     assert_not_equal Post.new.hash, Post.new.hash
+  end
+
+  test "records of different classes have different hashes" do
+    assert_not_equal Post.new(id: 1).hash, Developer.new(id: 1).hash
   end
 
   test "resetting column information doesn't remove attribute methods" do
